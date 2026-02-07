@@ -1,0 +1,26 @@
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+import { Toaster } from 'sonner';
+import App from './App';
+import './index.css';
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <BrowserRouter>
+      <App />
+      {/* Toast notifications */}
+      <Toaster
+        position="top-right"
+        richColors
+        closeButton
+        toastOptions={{
+          duration: 4000,
+          style: {
+            fontFamily: 'Inter, sans-serif',
+          },
+        }}
+      />
+    </BrowserRouter>
+  </StrictMode>
+);
