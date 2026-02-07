@@ -1,12 +1,12 @@
-import OpenAI from 'openai';
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import Product from '../models/Product.js';
 import Category from '../models/Category.js';
 import { asyncHandler } from '../middlewares/errorHandler.js';
 
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// --- Initialize Gemini Client ---
+// Direct key usage (Note: For better security in production, keep this in .env)
+const genAI = new GoogleGenerativeAI("AIzaSyB54P5Q8R-hY3Cdx5q5rRBzROO_BuQbQEc");
+const model = genAI.getGenerativeModel({ model: "gemini-pro" });
 
 /**
  * System prompt for the chatbot
@@ -36,9 +36,7 @@ When recommending products, be specific about features like:
 - Color options
 
 Keep responses concise but helpful. Use a friendly, professional tone.
-If you don't know something specific, guide the customer to contact support.
-
-IMPORTANT: When the user asks about products, I will provide you with actual product data from the database. Use this data to give specific recommendations.`;
+If you don't know something specific, guide the customer to contact support.`;
 
 /**
  * @desc    Handle chatbot message with streaming response
@@ -53,7 +51,7 @@ export const handleMessage = asyncHandler(async (req, res) => {
     throw new Error('Message is required');
   }
 
-  // Search for relevant products if the message seems product-related
+  // --- 1. Product Search Logic ---
   let productContext = '';
   const productKeywords = [
     'abaya', 'scarf', 'bag', 'shoe', 'accessory', 'accessories',
@@ -68,11 +66,8 @@ export const handleMessage = asyncHandler(async (req, res) => {
 
   if (isProductQuery) {
     try {
-      // Extract search terms from message
       const searchTerms = message.toLowerCase();
       const query = { isActive: true };
-
-      // Build search query based on message content
       const searchConditions = [];
 
       if (searchTerms.includes('abaya')) {
@@ -121,7 +116,6 @@ export const handleMessage = asyncHandler(async (req, res) => {
       if (products.length > 0) {
         productContext = '\n\nAvailable products matching the query:\n' +
           products.map(p => {
-            const mainImage = p.images?.find(img => img.isMain) || p.images?.[0];
             return `- ${p.name}: $${p.price}${p.rating ? `, Rating: ${p.rating}/5` : ''}${p.shortDescription ? ` - ${p.shortDescription}` : ''}`;
           }).join('\n');
       }
@@ -130,52 +124,56 @@ export const handleMessage = asyncHandler(async (req, res) => {
     }
   }
 
-  // Add cart context if provided
+  // --- 2. Cart Context ---
   let cartContext = '';
   if (cartSummary && cartSummary.items?.length > 0) {
     cartContext = `\n\nCurrent cart (${cartSummary.itemCount} items, Total: $${cartSummary.total?.toFixed(2)}):\n` +
       cartSummary.items.map(item => `- ${item.name} x${item.quantity}: $${(item.price * item.quantity).toFixed(2)}`).join('\n');
   }
 
-  // Build messages array for OpenAI
-  const messages = [
-    { role: 'system', content: SYSTEM_PROMPT + productContext + cartContext },
-    ...conversationHistory.slice(-10), // Keep last 10 messages for context
-    { role: 'user', content: message },
-  ];
+  // --- 3. Build Prompt for Gemini ---
+  // Gemini does not use "system roles" in the same way, so we combine the prompts.
+  // We also format previous history for context if needed, but for simplicity, we focus on the current turn + context.
+  
+  const fullPrompt = `${SYSTEM_PROMPT}
 
-  // Set headers for streaming
+CONTEXT INFORMATION:
+${productContext}
+${cartContext}
+
+USER QUESTION:
+${message}
+
+Please provide a helpful response based on the above information.`;
+
+  // --- 4. Stream Response Setup ---
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
   try {
-    // Create streaming completion
-    const stream = await openai.chat.completions.create({
-      model: 'gpt-4o-mini', // Cost-effective model, change to 'gpt-4' for better quality
-      messages,
-      stream: true,
-      max_tokens: 500,
-      temperature: 0.7,
-    });
+    // Generate streaming content using Gemini
+    const result = await model.generateContentStream(fullPrompt);
 
-    // Stream the response
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content || '';
-      if (content) {
-        res.write(`data: ${JSON.stringify({ content })}\n\n`);
+    for await (const chunk of result.stream) {
+      const chunkText = chunk.text();
+      
+      // We wrap the text in the format your Frontend expects (data: { content: "..." })
+      if (chunkText) {
+        res.write(`data: ${JSON.stringify({ content: chunkText })}\n\n`);
       }
     }
 
     res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
     res.end();
+
   } catch (error) {
-    console.error('OpenAI API Error:', error);
+    console.error('Gemini API Error:', error);
     
     // Send error as stream event
     res.write(`data: ${JSON.stringify({ 
       error: true, 
-      content: "I apologize, but I'm having trouble connecting right now. Please try again in a moment, or contact our support team for immediate assistance." 
+      content: "I apologize, but I'm having trouble connecting right now. Please try again in a moment." 
     })}\n\n`);
     res.end();
   }
@@ -187,29 +185,20 @@ export const handleMessage = asyncHandler(async (req, res) => {
  * @access  Public
  */
 export const handleMessageSync = asyncHandler(async (req, res) => {
-  const { message, conversationHistory = [] } = req.body;
+  const { message } = req.body;
 
   if (!message) {
     res.status(400);
     throw new Error('Message is required');
   }
 
-  const messages = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...conversationHistory.slice(-10),
-    { role: 'user', content: message },
-  ];
-
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
-    messages,
-    max_tokens: 500,
-    temperature: 0.7,
-  });
+  const fullPrompt = `${SYSTEM_PROMPT}\n\nUSER QUESTION: ${message}`;
+  const result = await model.generateContent(fullPrompt);
+  const response = result.response;
 
   res.json({
     success: true,
-    response: completion.choices[0].message.content,
+    response: response.text(),
   });
 });
 
@@ -228,7 +217,6 @@ export const getSuggestions = asyncHandler(async (req, res) => {
     { text: "Return policy", icon: "rotate-ccw" },
   ];
 
-  // Get featured categories
   const categories = await Category.find({ isActive: true })
     .select('name slug')
     .limit(4)
